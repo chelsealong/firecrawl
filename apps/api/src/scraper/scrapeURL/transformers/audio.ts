@@ -92,8 +92,8 @@ export async function fetchAudio(
     const error = await response
       .json()
       .catch(() => ({ detail: "Unknown error" }));
-    throwIfMediaAccessDenied(error);
     throwIfMediaBlocked(error);
+    throwIfMediaAccessDenied(error);
     throw new Error(`Audio download failed: ${error.detail}`);
   }
 
