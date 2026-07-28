@@ -310,8 +310,84 @@ fn parse_paragraph_with_listinfo(
     }
   }
 
+  let inlines = merge_adjacent_inlines(inlines);
+
   let list_info = paragraph_list_info(node, numbering);
   Some((Paragraph { kind, inlines }, list_info))
+}
+
+/// Word stores per-edit run boundaries even when adjacent runs share the same
+/// formatting (e.g. a heading retouched in several passes ends up as many
+/// `<w:r>` elements that are each individually bold). Left alone, each run
+/// becomes its own `Inline::Strong`/`Inline::Em`/etc. node, which renderers
+/// then emit as separate tags (`**Mil****ton**` instead of `**Milton**`),
+/// splitting words in the output. This merges adjacent inline nodes that
+/// carry identical formatting into one, recursing into their children first.
+fn merge_adjacent_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+  let normalized: Vec<Inline> = inlines.into_iter().map(normalize_inline_children).collect();
+  merge_sibling_inlines(normalized)
+}
+
+fn normalize_inline_children(inline: Inline) -> Inline {
+  match inline {
+    Inline::Strong(c) => Inline::Strong(merge_adjacent_inlines(c)),
+    Inline::Em(c) => Inline::Em(merge_adjacent_inlines(c)),
+    Inline::Del(c) => Inline::Del(merge_adjacent_inlines(c)),
+    Inline::Sup(c) => Inline::Sup(merge_adjacent_inlines(c)),
+    Inline::Sub(c) => Inline::Sub(merge_adjacent_inlines(c)),
+    Inline::Link { href, children } => Inline::Link {
+      href,
+      children: merge_adjacent_inlines(children),
+    },
+    other => other,
+  }
+}
+
+fn merge_sibling_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+  let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
+  for inline in inlines {
+    let leftover = match out.pop() {
+      Some(prev) => match merge_inline_pair(prev, inline) {
+        Ok(merged) => {
+          out.push(merged);
+          continue;
+        }
+        Err((prev, inline)) => {
+          out.push(prev);
+          inline
+        }
+      },
+      None => inline,
+    };
+    out.push(leftover);
+  }
+  out
+}
+
+fn merge_inline_pair(a: Inline, b: Inline) -> Result<Inline, (Inline, Inline)> {
+  match (a, b) {
+    (Inline::Strong(mut ac), Inline::Strong(bc)) => {
+      ac.extend(bc);
+      Ok(Inline::Strong(ac))
+    }
+    (Inline::Em(mut ac), Inline::Em(bc)) => {
+      ac.extend(bc);
+      Ok(Inline::Em(ac))
+    }
+    (Inline::Del(mut ac), Inline::Del(bc)) => {
+      ac.extend(bc);
+      Ok(Inline::Del(ac))
+    }
+    (Inline::Sup(mut ac), Inline::Sup(bc)) => {
+      ac.extend(bc);
+      Ok(Inline::Sup(ac))
+    }
+    (Inline::Sub(mut ac), Inline::Sub(bc)) => {
+      ac.extend(bc);
+      Ok(Inline::Sub(ac))
+    }
+    (a, b) => Err((a, b)),
+  }
 }
 
 fn paragraph_kind(
@@ -649,6 +725,7 @@ fn parse_hyperlink(node: &Node, rels: &Relationships, base_style: &RunStyle) -> 
       children.extend(parse_run(&child, rels, &combined_style));
     }
   }
+  let children = merge_adjacent_inlines(children);
 
   Some(Inline::Link { href, children })
 }
@@ -1071,4 +1148,72 @@ fn read_comments<R: Read + Seek>(
     });
   }
   out
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::document::renderers::html::HtmlRenderer;
+  use std::io::Write;
+  use zip::write::SimpleFileOptions;
+
+  fn make_docx(document_xml_body: &str) -> Vec<u8> {
+    let document_xml = format!(
+      r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{document_xml_body}</w:body>
+</w:document>"#
+    );
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buf);
+    let options = SimpleFileOptions::default();
+    zip.start_file("word/document.xml", options).unwrap();
+    zip.write_all(document_xml.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    buf.into_inner()
+  }
+
+  #[test]
+  fn merges_adjacent_bold_runs_split_mid_word() {
+    // Word stores this as two separate bold runs ("Mil" / "ton") due to
+    // editing history, even though it displays as one bold word.
+    let docx = make_docx(
+      r#"<w:p>
+        <w:r><w:rPr><w:b/></w:rPr><w:t>Mil</w:t></w:r>
+        <w:r><w:rPr><w:b/></w:rPr><w:t>ton</w:t></w:r>
+        <w:r><w:t> Keynes</w:t></w:r>
+      </w:p>"#,
+    );
+
+    let document = DocxProvider::new().parse_buffer(&docx).unwrap();
+    let html = HtmlRenderer::new().render(&document);
+
+    assert!(
+      html.contains("<strong>Milton</strong>"),
+      "expected adjacent bold runs to be merged into a single <strong> tag, got: {html}"
+    );
+    assert!(
+      !html.contains("</strong><strong>"),
+      "adjacent bold runs should be merged, not emitted as separate <strong> tags: {html}"
+    );
+  }
+
+  #[test]
+  fn does_not_merge_runs_with_different_formatting() {
+    let docx = make_docx(
+      r#"<w:p>
+        <w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>
+        <w:r><w:t>Plain</w:t></w:r>
+        <w:r><w:rPr><w:i/></w:rPr><w:t>Italic</w:t></w:r>
+      </w:p>"#,
+    );
+
+    let document = DocxProvider::new().parse_buffer(&docx).unwrap();
+    let html = HtmlRenderer::new().render(&document);
+
+    assert!(html.contains("<strong>Bold</strong>"));
+    assert!(html.contains("Plain"));
+    assert!(html.contains("<em>Italic</em>"));
+  }
 }
