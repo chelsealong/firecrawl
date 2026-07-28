@@ -365,26 +365,35 @@ fn merge_sibling_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
 }
 
 fn merge_inline_pair(a: Inline, b: Inline) -> Result<Inline, (Inline, Inline)> {
+  // Merging two composite nodes can bring a previously non-adjacent pair of
+  // children together at the new boundary (e.g. two runs that are each
+  // bold+italic become `Strong([Em(Mil), Em(ton)])` after only the outer
+  // `Strong` is merged) — `merge_sibling_inlines` on the concatenation
+  // re-checks that boundary so nested formatting fully collapses too.
   match (a, b) {
     (Inline::Strong(mut ac), Inline::Strong(bc)) => {
       ac.extend(bc);
-      Ok(Inline::Strong(ac))
+      Ok(Inline::Strong(merge_sibling_inlines(ac)))
     }
     (Inline::Em(mut ac), Inline::Em(bc)) => {
       ac.extend(bc);
-      Ok(Inline::Em(ac))
+      Ok(Inline::Em(merge_sibling_inlines(ac)))
     }
     (Inline::Del(mut ac), Inline::Del(bc)) => {
       ac.extend(bc);
-      Ok(Inline::Del(ac))
+      Ok(Inline::Del(merge_sibling_inlines(ac)))
     }
     (Inline::Sup(mut ac), Inline::Sup(bc)) => {
       ac.extend(bc);
-      Ok(Inline::Sup(ac))
+      Ok(Inline::Sup(merge_sibling_inlines(ac)))
     }
     (Inline::Sub(mut ac), Inline::Sub(bc)) => {
       ac.extend(bc);
-      Ok(Inline::Sub(ac))
+      Ok(Inline::Sub(merge_sibling_inlines(ac)))
+    }
+    (Inline::Code(mut a), Inline::Code(b)) => {
+      a.push_str(&b);
+      Ok(Inline::Code(a))
     }
     (a, b) => Err((a, b)),
   }
@@ -725,8 +734,10 @@ fn parse_hyperlink(node: &Node, rels: &Relationships, base_style: &RunStyle) -> 
       children.extend(parse_run(&child, rels, &combined_style));
     }
   }
-  let children = merge_adjacent_inlines(children);
 
+  // Not merged here: the enclosing paragraph's `merge_adjacent_inlines` call
+  // recurses into `Link` children (see `normalize_inline_children`), so
+  // merging again at this call site would just redo the same work.
   Some(Inline::Link { href, children })
 }
 
@@ -1215,5 +1226,50 @@ mod tests {
     assert!(html.contains("<strong>Bold</strong>"));
     assert!(html.contains("Plain"));
     assert!(html.contains("<em>Italic</em>"));
+  }
+
+  #[test]
+  fn merges_nested_formatting_across_adjacent_runs() {
+    // Two runs that are each bold AND italic parse as Strong(Em(Text)) each;
+    // merging only the outer Strong would leave two separate <em> tags
+    // inside (<strong><em>Mil</em><em>ton</em></strong>) — the boundary
+    // between the newly-adjacent Em children must also be re-checked.
+    let docx = make_docx(
+      r#"<w:p>
+        <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Mil</w:t></w:r>
+        <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>ton</w:t></w:r>
+      </w:p>"#,
+    );
+
+    let document = DocxProvider::new().parse_buffer(&docx).unwrap();
+    let html = HtmlRenderer::new().render(&document);
+
+    assert!(
+      html.contains("<strong><em>Milton</em></strong>"),
+      "expected nested bold+italic runs to fully merge, got: {html}"
+    );
+    assert!(
+      !html.contains("</em><em>"),
+      "nested em runs should be merged, not left as separate <em> tags: {html}"
+    );
+  }
+
+  #[test]
+  fn merges_adjacent_code_runs_split_mid_word() {
+    let docx = make_docx(
+      r#"<w:p>
+        <w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t>Mil</w:t></w:r>
+        <w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t>ton</w:t></w:r>
+      </w:p>"#,
+    );
+
+    let document = DocxProvider::new().parse_buffer(&docx).unwrap();
+    let html = HtmlRenderer::new().render(&document);
+
+    assert!(
+      html.contains("<code>Milton</code>"),
+      "expected adjacent code runs to be merged into a single <code> tag, got: {html}"
+    );
+    assert!(!html.contains("</code><code>"));
   }
 }
