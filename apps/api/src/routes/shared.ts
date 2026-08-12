@@ -20,7 +20,7 @@ import {
 import { UNSUPPORTED_SITE_MESSAGE } from "../lib/strings";
 import * as geoip from "geoip-country";
 import { isSelfHosted } from "../lib/deployment";
-import { validate as isUuid } from "uuid";
+import { validate as isUuid, v4 as uuidv4 } from "uuid";
 
 import { config } from "../config";
 import { getAgentFreeRequestsLeft } from "../db/rpc";
@@ -246,16 +246,14 @@ export function authMiddleware(
           if (auth.status === 401 || auth.agentAuthDiscovery) {
             applyAgentAuthDiscoveryHeader(res);
           }
-          return res
-            .status(auth.status)
-            .json({
-              success: false,
-              error: auth.error,
-              ...(auth.keylessReason ? { reason: auth.keylessReason } : {}),
-              ...(auth.retryAfterSeconds
-                ? { retry_after_seconds: auth.retryAfterSeconds }
-                : {}),
-            });
+          return res.status(auth.status).json({
+            success: false,
+            error: auth.error,
+            ...(auth.keylessReason ? { reason: auth.keylessReason } : {}),
+            ...(auth.retryAfterSeconds
+              ? { retry_after_seconds: auth.retryAfterSeconds }
+              : {}),
+          });
         } else {
           return;
         }
@@ -441,9 +439,20 @@ export function validateJobIdParam(
   next();
 }
 
+const REQUEST_ID_PATTERN = /^[a-zA-Z0-9_.:-]{1,128}$/;
+
 export function requestTimingMiddleware(version: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const startTime = new Date().getTime();
+
+    const incomingRequestId = req.headers["x-request-id"];
+    const requestId =
+      typeof incomingRequestId === "string" &&
+      REQUEST_ID_PATTERN.test(incomingRequestId)
+        ? incomingRequestId
+        : uuidv4();
+    (req as any).requestId = requestId;
+    res.setHeader("x-request-id", requestId);
 
     // Attach timing data to request
     (req as any).requestTiming = {
@@ -473,6 +482,7 @@ export function requestTimingMiddleware(version: string) {
           startTime,
           requestTime,
           statusCode: res.statusCode,
+          requestId,
         });
       }
 
