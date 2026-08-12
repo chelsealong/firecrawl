@@ -55,6 +55,7 @@ export async function searchController(
   const teamForcedKind = getSearchForcedKind(req.acuc?.flags);
   let logger = _logger.child({
     jobId,
+    requestId: (req as any).requestId,
     teamId: req.auth.team_id,
     module: "api/v2",
     method: "searchController",

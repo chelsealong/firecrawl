@@ -186,9 +186,9 @@ export async function scrapeController(
         );
         if (!reservation.ok) {
           applyAgentAuthDiscoveryHeader(res);
-          return res.status(429).json(
-            await keylessLimitBody(req.auth.team_id, "v2_scrape"),
-          );
+          return res
+            .status(429)
+            .json(await keylessLimitBody(req.auth.team_id, "v2_scrape"));
         }
         reservedKeylessCredits = projectedKeylessCredits;
       }
@@ -198,6 +198,7 @@ export async function scrapeController(
         jobId,
         noq: true,
         scrapeId: jobId,
+        requestId: (req as any).requestId,
         teamId: req.auth.team_id,
         team_id: req.auth.team_id,
         zeroDataRetention,

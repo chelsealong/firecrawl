@@ -20,7 +20,7 @@ import {
 import { UNSUPPORTED_SITE_MESSAGE } from "../lib/strings";
 import * as geoip from "geoip-country";
 import { isSelfHosted } from "../lib/deployment";
-import { validate as isUuid } from "uuid";
+import { validate as isUuid, v7 as uuidv7 } from "uuid";
 
 import { config } from "../config";
 import { getAgentFreeRequestsLeft } from "../db/rpc";
@@ -246,16 +246,14 @@ export function authMiddleware(
           if (auth.status === 401 || auth.agentAuthDiscovery) {
             applyAgentAuthDiscoveryHeader(res);
           }
-          return res
-            .status(auth.status)
-            .json({
-              success: false,
-              error: auth.error,
-              ...(auth.keylessReason ? { reason: auth.keylessReason } : {}),
-              ...(auth.retryAfterSeconds
-                ? { retry_after_seconds: auth.retryAfterSeconds }
-                : {}),
-            });
+          return res.status(auth.status).json({
+            success: false,
+            error: auth.error,
+            ...(auth.keylessReason ? { reason: auth.keylessReason } : {}),
+            ...(auth.retryAfterSeconds
+              ? { retry_after_seconds: auth.retryAfterSeconds }
+              : {}),
+          });
         } else {
           return;
         }
@@ -441,9 +439,23 @@ export function validateJobIdParam(
   next();
 }
 
+// Printable ASCII only, capped at a sane length, so a client-supplied
+// X-Request-ID can't inject newlines into logs or blow up header size.
+const VALID_REQUEST_ID = /^[\x20-\x7E]{1,128}$/;
+
+function getOrCreateRequestId(req: Request): string {
+  const incoming = req.headers["x-request-id"];
+  const candidate = Array.isArray(incoming) ? incoming[0] : incoming;
+  return candidate && VALID_REQUEST_ID.test(candidate) ? candidate : uuidv7();
+}
+
 export function requestTimingMiddleware(version: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const startTime = new Date().getTime();
+
+    const requestId = getOrCreateRequestId(req);
+    (req as any).requestId = requestId;
+    res.setHeader("x-request-id", requestId);
 
     // Attach timing data to request
     (req as any).requestTiming = {
@@ -473,6 +485,7 @@ export function requestTimingMiddleware(version: string) {
           startTime,
           requestTime,
           statusCode: res.statusCode,
+          requestId,
         });
       }
 
