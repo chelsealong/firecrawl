@@ -74,6 +74,9 @@ describe("Map tests", () => {
           ),
         ),
       ).toBe(true);
+      expect(
+        response.body.links.some(x => x.url === "https://www.hfea.gov.uk"),
+      ).toBe(true);
     },
     60000,
   );
